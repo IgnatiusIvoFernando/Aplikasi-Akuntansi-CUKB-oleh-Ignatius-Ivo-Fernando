@@ -1,11 +1,24 @@
-import '../akuntansi/edit_saldo_page.dart';
-import 'package:flutter/material.dart';
-import '../../config/warna_cukb.dart';
+import 'dart:io';
+import 'package:excel/excel.dart' as excel_pkg;
+import 'package:flutter/material.dart' hide Border;
+import 'package:flutter/widgets.dart';
+import 'package:intl/intl.dart';
 import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:printing/printing.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_file/open_file.dart';
+import 'package:permission_handler/permission_handler.dart'; // Tambahkan ini
+
+import '../../controllers/jurnal_controller.dart';
+import '../akuntansi/edit_saldo_page.dart';
+import '../../config/warna_cukb.dart';
 import '../widgets/app_drawer.dart';
 import '../../controllers/database_helper.dart';
 import '../../controllers/akun_controller.dart';
-import '../../models/jurnal.dart';
+import '../../models/jurnal_umum_header.dart';
 import '../../models/jurnal_detail.dart';
 import '../../models/akun.dart';
 
@@ -22,9 +35,7 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
 
   List<Jurnal> _daftarJurnal = [];
   bool _isLoading = true;
-
-  // Cache untuk nama akun
-  final Map<int, String> _namaAkunCache = {};
+  final Map<int, bool> _hapusLoadingState = {};
 
   @override
   void initState() {
@@ -32,170 +43,302 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
     _loadDataDariDatabase();
   }
 
-  // LOAD DATA DARI DATABASE - sesuai struktur Anda
   Future<void> _loadDataDariDatabase() async {
     setState(() => _isLoading = true);
-
     try {
-      // 1. Query jurnal dari database - TANPA JOIN
       final db = await _dbHelper.database;
-      final jurnalsResult = await db.rawQuery('''
-        SELECT * FROM jurnal_umum 
-        ORDER BY tanggal DESC
-      ''');
+      final result = await db.rawQuery('''
+      SELECT 
+        j.id as jurnal_id, j.tanggal, j.keterangan, j.created_at,
+        d.id as detail_id, d.akun_id, d.debit, d.kredit,
+        a.nama as akun_nama, a.kategori_id
+      FROM jurnal_umum j
+      LEFT JOIN jurnal_detail d ON j.id = d.jurnal_id
+      LEFT JOIN akun a ON d.akun_id = a.id
+      ORDER BY j.tanggal DESC, j.id, d.id
+    ''');
 
-      if (jurnalsResult.isEmpty) {
-        setState(() {
-          _daftarJurnal = [];
-          _isLoading = false;
-        });
+      if (!mounted) return;
+      if (result.isEmpty) {
+        setState(() { _daftarJurnal = []; _isLoading = false; });
         return;
       }
 
-      // 2. Load semua akun untuk mapping
-      final semuaAkun = await _akunController.getSemuaAkun();
-      for (var akun in semuaAkun) {
-        if (akun.id != null) {
-          _namaAkunCache[akun.id!] = akun.nama;
+      final Map<int, Jurnal> jurnalMap = {};
+      for (var row in result) {
+        final jurnalId = row['jurnal_id'] as int;
+        if (!jurnalMap.containsKey(jurnalId)) {
+          jurnalMap[jurnalId] = Jurnal(
+            id: jurnalId,
+            tanggal: DateTime.parse(row['tanggal'].toString()),
+            keterangan: row['keterangan'].toString(),
+            details: [],
+          );
+        }
+        if (row['detail_id'] != null) {
+          jurnalMap[jurnalId]!.details.add(JurnalDetail(
+            id: row['detail_id'] as int,
+            jurnalId: jurnalId,
+            akunId: row['akun_id'] as int,
+            debit: (row['debit'] as num?)?.toDouble() ?? 0,
+            kredit: (row['kredit'] as num?)?.toDouble() ?? 0,
+            akun: Akun(
+              id: row['akun_id'] as int,
+              nama: row['akun_nama'].toString(),
+              kategoriId: row['kategori_id'] as int,
+            ),
+          ));
         }
       }
 
-      // 3. Proses setiap jurnal
-      final jurnals = <Jurnal>[];
+      for (var jurnal in jurnalMap.values) { jurnal.calculateTotals(); }
+      setState(() { _daftarJurnal = jurnalMap.values.toList(); _isLoading = false; });
+    } catch (e) {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
 
-      for (var jurnalMap in jurnalsResult) {
-        final jurnalId = jurnalMap['id'] as int;
+  Future<void> _hapusJurnal(Jurnal jurnal, BuildContext context) async {
+    final konfirmasi = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Hapus Jurnal?"),
+        content: Text("Hapus jurnal tanggal ${_formatTanggal(jurnal.tanggal)}?"),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Batal")),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text("Hapus", style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
 
-        // Ambil details untuk jurnal ini
-        final detailsResult = await db.rawQuery('''
-          SELECT * FROM jurnal_detail 
-          WHERE jurnal_id = ? 
-          ORDER BY id
-        ''', [jurnalId]);
+    if (konfirmasi != true || jurnal.id == null) return;
 
-        // Convert ke JurnalDetail
-        final details = detailsResult.map((map) {
-          return JurnalDetail.fromMap(map);
-        }).toList();
+    setState(() => _hapusLoadingState[jurnal.id!] = true);
 
-        // Buat Akun object untuk setiap detail
-        for (var detail in details) {
-          if (_namaAkunCache.containsKey(detail.akunId)) {
-            detail.akun = Akun(
-              id: detail.akunId,
-              nama: _namaAkunCache[detail.akunId]!,
-              kategoriId: 0,
-            );
-          }
-        }
+    try {
+      final db = await _dbHelper.database;
 
-        // Buat object Jurnal dengan factory method
-        final jurnal = Jurnal.fromMapWithDetails(jurnalMap, details);
+      // Gunakan Transaction untuk memastikan konsistensi data
+      await db.transaction((txn) async {
+        // 1. Hapus SEMUA detail yang berhubungan dengan jurnal_id ini
+        await txn.delete(
+          'jurnal_detail',
+          where: 'jurnal_id = ?',
+          whereArgs: [jurnal.id],
+        );
 
-        jurnals.add(jurnal);
-      }
+        // 2. Hapus header jurnalnya
+        await txn.delete(
+          'jurnal_umum',
+          where: 'id = ?',
+          whereArgs: [jurnal.id],
+        );
+      });
+
+      if (!mounted) return;
 
       setState(() {
-        _daftarJurnal = jurnals;
-        _isLoading = false;
+        _daftarJurnal.removeWhere((j) => j.id == jurnal.id);
+        _hapusLoadingState.remove(jurnal.id!);
       });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("Jurnal dan detail berhasil dihapus"),
+          backgroundColor: Colors.green,
+        ),
+      );
 
     } catch (e) {
-      print('Error loading data: $e');
-      setState(() => _isLoading = false);
+      print('Error deleting jurnal: $e');
+      if (mounted) {
+        setState(() => _hapusLoadingState.remove(jurnal.id!));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Gagal menghapus: $e"), backgroundColor: Colors.red),
+        );
+      }
     }
   }
-  // GROUP BY PERIODE dari tanggal ISO String
+
   Map<String, List<Jurnal>> _kelompokkanPerPeriode() {
     final Map<String, List<Jurnal>> grouped = {};
+    final monthNames = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
 
     for (var jurnal in _daftarJurnal) {
-      // Parse tanggal (ISO String) untuk ambil bulan dan tahun
-      // Format: "2023-12-01T00:00:00.000"
-      final bulan = jurnal.tanggal.month;
-      final tahun = jurnal.tanggal.year;
+      final periode = '${monthNames[jurnal.tanggal.month - 1]} ${jurnal.tanggal.year}';
+      grouped.putIfAbsent(periode, () => []).add(jurnal);
+    }
+    return grouped;
+  }
 
-      // Nama bulan Indonesia
-      final namaBulan = [
-        'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
-        'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'
-      ];
-
-      final periode = '${namaBulan[bulan - 1]} $tahun';
-
-      if (!grouped.containsKey(periode)) {
-        grouped[periode] = [];
+  // ================= EXCEL (FIXED: DOWNLOAD FOLDER & SNACKBAR) =================
+  Future<void> _exportExcel() async {
+    try {
+      // 1. Request Permission
+      var status = await Permission.storage.request();
+      if (!status.isGranted) {
+        await Permission.manageExternalStorage.request();
       }
-      grouped[periode]!.add(jurnal);
-    }
 
-    // Urutkan periode dari terbaru ke terlama
-    final sortedKeys = grouped.keys.toList()
-      ..sort((a, b) {
-        try {
-          final aParts = a.split(' ');
-          final bParts = b.split(' ');
+      setState(() => _isLoading = true);
 
-          if (aParts.length == 2 && bParts.length == 2) {
-            // Map nama bulan ke angka
-            final bulanIndex = {
-              'Januari': 1, 'Februari': 2, 'Maret': 3, 'April': 4,
-              'Mei': 5, 'Juni': 6, 'Juli': 7, 'Agustus': 8,
-              'September': 9, 'Oktober': 10, 'November': 11, 'Desember': 12
-            };
+      var workbook = excel_pkg.Excel.createExcel();
+      workbook.rename(workbook.getDefaultSheet()!, 'Jurnal Umum');
+      excel_pkg.Sheet sheet = workbook['Jurnal Umum'];
 
-            final aBulan = bulanIndex[aParts[0]] ?? 0;
-            final bBulan = bulanIndex[bParts[0]] ?? 0;
-            final aTahun = int.tryParse(aParts[1]) ?? 0;
-            final bTahun = int.tryParse(bParts[1]) ?? 0;
+      var headerStyle = excel_pkg.CellStyle(
+        // Gunakan ExcelColor.fromHexString untuk mengonversi string ke objek warna
+        backgroundColorHex: excel_pkg.ExcelColor.fromHexString('#1A5276'),
+        fontColorHex: excel_pkg.ExcelColor.fromHexString('#FFFFFF'),
+        bold: true,
+        horizontalAlign: excel_pkg.HorizontalAlign.Center,
+      );
 
-            // Urutkan tahun dulu, lalu bulan (descending)
-            if (aTahun != bTahun) {
-              return bTahun.compareTo(aTahun); // Tahun terbaru dulu
-            }
-            return bBulan.compareTo(aBulan); // Bulan terbaru dulu
-          }
-        } catch (e) {
-          print('Error sorting: $e');
+      final jurnalByPeriode = _kelompokkanPerPeriode();
+
+      for (var entry in jurnalByPeriode.entries) {
+        sheet.appendRow([excel_pkg.TextCellValue("LAPORAN JURNAL PERIODE: ${entry.key.toUpperCase()}")]);
+
+        List<excel_pkg.TextCellValue> headers = [
+          excel_pkg.TextCellValue('Tanggal'),
+          excel_pkg.TextCellValue('Keterangan'),
+          excel_pkg.TextCellValue('Nama Akun'),
+          excel_pkg.TextCellValue('Debit'),
+          excel_pkg.TextCellValue('Kredit'),
+        ];
+        sheet.appendRow(headers);
+
+        var lastRowNum = sheet.maxRows - 1;
+        for (var i = 0; i < headers.length; i++) {
+          var cell = sheet.cell(excel_pkg.CellIndex.indexByColumnRow(columnIndex: i, rowIndex: lastRowNum));
+          cell.cellStyle = headerStyle;
         }
-        return 0;
-      });
 
-    // Buat map baru dengan urutan yang benar
-    final Map<String, List<Jurnal>> sortedMap = {};
-    for (var key in sortedKeys) {
-      sortedMap[key] = grouped[key]!;
+        for (var jurnal in entry.value) {
+          for (var detail in jurnal.details) {
+            sheet.appendRow([
+              excel_pkg.TextCellValue(_formatTanggal(jurnal.tanggal)),
+              excel_pkg.TextCellValue(jurnal.keterangan),
+              excel_pkg.TextCellValue(detail.akun?.nama ?? ''),
+              excel_pkg.DoubleCellValue(detail.debit),
+              excel_pkg.DoubleCellValue(detail.kredit),
+            ]);
+          }
+        }
+        sheet.appendRow([excel_pkg.TextCellValue("")]);
+      }
+
+      // 2. Tentukan Path Download Publik
+      String namaPeriode = jurnalByPeriode.keys.first.replaceAll(' ', '_');
+
+      String fileName = "Jurnal_Umum_$namaPeriode.xlsx";
+      Directory? directory;
+
+      if (Platform.isAndroid) {
+        directory = Directory('/storage/emulated/0/Download');
+        if (!await directory.exists()) {
+          directory = await getExternalStorageDirectory();
+        }
+      } else {
+        directory = await getApplicationDocumentsDirectory();
+      }
+
+      final filePath = "${directory!.path}/$fileName";
+      final fileBytes = workbook.save();
+
+      if (fileBytes != null) {
+        File(filePath)
+          ..createSync(recursive: true)
+          ..writeAsBytesSync(fileBytes);
+
+        if (mounted) {
+          setState(() => _isLoading = false);
+          // 3. Tampilkan Snackbar Berhasil
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("Berhasil diunduh ke folder Download: $fileName"),
+              backgroundColor: Colors.green,
+              action: SnackBarAction(
+                label: "BUKA",
+                textColor: Colors.white,
+                onPressed: () => OpenFile.open(filePath),
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Gagal Export: $e"), backgroundColor: Colors.red),
+        );
+      }
     }
-
-    return sortedMap;
   }
 
-  // FORMAT TANGGAL: dd/MM/yyyy
-  String _formatTanggal(DateTime date) {
-    final day = date.day.toString().padLeft(2, '0');
-    final month = date.month.toString().padLeft(2, '0');
-    final year = date.year;
-    return '$day/$month/$year';
+  // ================= PDF =================
+  Future<void> _printPdf() async {
+    final doc = pw.Document();
+    final jurnalByPeriode = _kelompokkanPerPeriode();
+
+    for (var entry in jurnalByPeriode.entries) {
+      doc.addPage(pw.MultiPage(
+        pageFormat: PdfPageFormat.a4,
+        margin: const pw.EdgeInsets.all(32),
+        build: (pw.Context context) => [
+          pw.Header(
+              level: 0,
+              child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    pw.Text("LAPORAN JURNAL UMUM", style: pw.TextStyle(fontSize: 18, fontWeight: pw.FontWeight.bold, color: PdfColors.blueGrey900)),
+                    pw.Text("Periode: ${entry.key}", style: pw.TextStyle(fontSize: 14, color: PdfColors.blueGrey700)),
+                    pw.Divider(thickness: 2, color: PdfColors.blueGrey900),
+                  ]
+              )
+          ),
+          pw.SizedBox(height: 10),
+          pw.Table.fromTextArray(
+            border: pw.TableBorder.all(color: PdfColors.grey400, width: 0.5),
+            headerStyle: pw.TextStyle(color: PdfColors.white, fontWeight: pw.FontWeight.bold),
+            headerDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey800),
+            rowDecoration: const pw.BoxDecoration(color: PdfColors.blueGrey50),
+            headers: ['Tanggal', 'Keterangan', 'Akun', 'Debit', 'Kredit'],
+            data: entry.value.expand((j) => j.details.map((d) => [
+              _formatTanggal(j.tanggal), j.keterangan, d.akun?.nama ?? '', _formatUang(d.debit), _formatUang(d.kredit)
+            ])).toList(),
+            cellAlignments: {
+              3: pw.Alignment.centerRight,
+              4: pw.Alignment.centerRight,
+            },
+          ),
+          pw.SizedBox(height: 20),
+        ],
+      ));
+    }
+    await Printing.layoutPdf(onLayout: (format) async => doc.save());
   }
 
-  // FORMAT UANG: "Rp 1.000.000"
+  String _formatTanggal(DateTime date) => DateFormat('dd/MM/yyyy').format(date);
+
   String _formatUang(double amount) {
-    if (amount == 0) return '0';
-    return 'Rp ${amount.toInt().toString().replaceAllMapped(
-      RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
-          (Match m) => '${m[1]}.',
-    )}';
+    final formatter = NumberFormat.currency(symbol: 'Rp ', decimalDigits: 0);
+    return formatter.format(amount);
   }
 
   @override
   Widget build(BuildContext context) {
     final jurnalByPeriode = _kelompokkanPerPeriode();
-
     return Scaffold(
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: Colors.black87,
-        title: const Text("CUKB", style: TextStyle(color: Colors.white)),
+        title: const Text("Akuntansi", style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       drawer: const AppDrawer(selectedMenu: 'jurnal'),
@@ -210,13 +353,7 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
           children: [
             _headerButton("Jurnal Umum"),
             const SizedBox(height: 12),
-
-            // Tampilkan per periode
-            ...jurnalByPeriode.entries.map((entry) {
-              return Builder(
-                builder: (context) => _periodeSection(entry.key, entry.value, context),
-              );
-            }),
+            ...jurnalByPeriode.entries.map((entry) => _periodeSection(entry.key, entry.value, context)),
           ],
         ),
       ),
@@ -229,19 +366,9 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
         padding: const EdgeInsets.all(40),
         child: Column(
           children: [
-            Icon(
-              Icons.receipt_long,
-              size: 60,
-              color: Colors.grey[400],
-            ),
+            Icon(Icons.receipt_long, size: 60, color: Colors.grey[400]),
             const SizedBox(height: 16),
-            const Text(
-              'Belum ada data jurnal',
-              style: TextStyle(
-                fontSize: 16,
-                color: Colors.grey,
-              ),
-            ),
+            const Text('Belum ada data jurnal', style: TextStyle(fontSize: 16, color: Colors.grey)),
           ],
         ),
       ),
@@ -251,10 +378,7 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
   Widget _headerButton(String text) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 14),
-      decoration: BoxDecoration(
-        color: AppColors.penanda,
-        borderRadius: BorderRadius.circular(6),
-      ),
+      decoration: BoxDecoration(color: AppColors.penanda, borderRadius: BorderRadius.circular(6)),
       child: Text(text, style: const TextStyle(color: Colors.white)),
     );
   }
@@ -265,26 +389,12 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
       children: [
         Container(
           padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(6),
-          ),
-          child: Text(
-            "Periode $periode",
-            style: const TextStyle(color: Colors.white),
-          ),
+          decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(6)),
+          child: Text("Periode $periode", style: const TextStyle(color: Colors.white)),
         ),
-
         const SizedBox(height: 12),
-
-        // Isi jurnal untuk periode ini
-        Builder(
-          builder: (innerContext) => _jurnalList(jurnals, innerContext),
-        ),
-
+        _jurnalList(jurnals, context),
         const SizedBox(height: 12),
-
-        // Tombol print dan excel (jika perlu)
         Row(
           children: [
             _printButton(),
@@ -292,7 +402,6 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
             _excelButton(),
           ],
         ),
-
         const SizedBox(height: 25),
       ],
     );
@@ -300,13 +409,19 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
 
   Widget _jurnalList(List<Jurnal> jurnals, BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(
-        maxHeight: 500,
-      ),
-      padding: const EdgeInsets.all(10),
+      constraints: const BoxConstraints(maxHeight: 500),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.layar_primer,
-        borderRadius: BorderRadius.circular(4),
+        color: AppColors.layar_primer.withOpacity(0.9), // Sedikit transparan
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.white.withOpacity(0.6), width: 1.5), // Inner glow
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            offset: const Offset(0, 5),
+          ),
+        ],
       ),
       child: SingleChildScrollView(
         scrollDirection: Axis.vertical,
@@ -323,10 +438,7 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
   Widget _tabelJurnal(Jurnal jurnal, BuildContext context) {
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: AppColors.layar_primer,
-        borderRadius: BorderRadius.circular(4),
-      ),
+      decoration: BoxDecoration(color: AppColors.layar_primer, borderRadius: BorderRadius.circular(4)),
       child: Padding(
         padding: const EdgeInsets.only(left: 4, right: 4, top: 4, bottom: 6),
         child: Column(
@@ -337,14 +449,19 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
               child: Row(
                 children: [
                   DataTable(
-                    headingRowColor: WidgetStateProperty.all(Colors.black),
+                    headingRowColor: WidgetStateProperty.all(const Color(0xFF1A1A1A)), // Hitam metalik
                     headingTextStyle: const TextStyle(
                       color: Colors.white,
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
+                      letterSpacing: 0.5,
                     ),
-                    dataRowColor: WidgetStateProperty.all(const Color(0xFFC9BBFF)),
-                    border: TableBorder.all(color: Colors.black, width: 1),
+                    dataRowColor: WidgetStateProperty.resolveWith((states) => const Color(0xFFE0D8FF)), // Lavender lebih terang
+                    border: TableBorder.all(
+                      color: Colors.black.withOpacity(0.2),
+                      width: 1,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
                     columnSpacing: 24,
                     headingRowHeight: 30,
                     dataRowMinHeight: 28,
@@ -355,132 +472,140 @@ class _JurnalUmumPageState extends State<JurnalUmumPage> {
                       DataColumn(label: Text("Kredit")),
                     ],
                     rows: [
-                      // Data rows dari jurnal details
                       ...jurnal.details.map((detail) {
-                        final namaAkun = detail.akun?.nama ?? _namaAkunCache[detail.akunId] ?? 'Akun ${detail.akunId}';
-
                         return DataRow(
                           cells: [
                             DataCell(Text(_formatTanggal(jurnal.tanggal))),
-                            DataCell(Text(namaAkun)),
+                            DataCell(Text(detail.akun?.nama ?? '')),
                             DataCell(Text(_formatUang(detail.debit))),
                             DataCell(Text(_formatUang(detail.kredit))),
                           ],
                         );
                       }),
-
-                      // Total row
                       DataRow(
                         cells: [
                           const DataCell(Text("")),
                           const DataCell(Text("TOTAL", style: TextStyle(fontWeight: FontWeight.bold))),
-                          DataCell(Text(
-                            _formatUang(jurnal.totalDebit),
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          )),
-                          DataCell(Text(
-                            _formatUang(jurnal.totalKredit),
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          )),
+                          DataCell(Text(_formatUang(jurnal.totalDebit), style: const TextStyle(fontWeight: FontWeight.bold))),
+                          DataCell(Text(_formatUang(jurnal.totalKredit), style: const TextStyle(fontWeight: FontWeight.bold))),
                         ],
                       ),
                     ],
                   ),
-
                   const SizedBox(width: 30),
-
-                  // Tombol Edit
-                  Container(
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(builder: (context) => EditSaldoPage(jurnal: jurnal),
+                  Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: 70,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            Navigator.push(context, MaterialPageRoute(builder: (context) => EditSaldoPage(jurnal: jurnal))).then((value) {
+                              if (value == true) _loadDataDariDatabase();
+                            });
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.tombol_edit,
+                            elevation: 3,
+                            shadowColor: AppColors.tombol_edit.withOpacity(0.5),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            padding: EdgeInsets.zero,
                           ),
-                          ).then((value) {
-                            if (value == true){
-                              _loadDataDariDatabase();
-                            }
-                        }
-                        );
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.tombol_edit,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(4),
+                          child: const Text("Edit", style: TextStyle(color: Colors.black, fontSize: 12)),
                         ),
                       ),
-                      child: const Text(
-                        "Edit",
-                        style: TextStyle(color: Colors.black),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: 70,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            if (_hapusLoadingState[jurnal.id] != true) _hapusJurnal(jurnal, context);
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFFFF3B30),
+                            elevation: 3,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                            padding: EdgeInsets.zero,
+                          ),
+                          child: _hapusLoadingState[jurnal.id] == true
+                              ? const SizedBox(height: 16, width: 16, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(Colors.white)))
+                              : const Text("Hapus", style: TextStyle(color: Colors.white, fontSize: 12)),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 4),
-
-            // Bagian Keterangan
-            Row(
-              children: [
-                Container(
-                  height: 30,
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-                  color: Colors.black,
-                  child: const Text(
-                    "Keterangan",
-                    style: TextStyle(color: Colors.white, fontSize: 12),
-                  ),
-                ),
-                Expanded(
-                  child: Container(
-                    height: 30,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFD8CEFF),
-                      border: Border.all(color: Colors.black, width: 1),
+            IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch, // Menarik container agar tinggi maksimal
+                children: [
+                  Container(
+                    width: 100, // Berikan lebar pasti agar rapi
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: const BoxDecoration(
+                      color: Colors.black,
+                      borderRadius: BorderRadius.horizontal(left: Radius.circular(5)),
                     ),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
+                    child: const Center(
                       child: Text(
-                        jurnal.keterangan,
-                        style: const TextStyle(fontSize: 12),
+                          "Keterangan",
+                          style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)
                       ),
                     ),
                   ),
-                ),
-              ],
-            ),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7), // Padding lebih lega
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD8CEFF),
+                        borderRadius: const BorderRadius.horizontal(right: Radius.circular(5)),
+                        border: Border.all(color: Colors.black12, width: 1),
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [Colors.white.withOpacity(0.3), Colors.transparent],
+                        ),
+                      ),
+                      child: Text(
+                        jurnal.keterangan,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontStyle: FontStyle.italic,
+                          height: 1.4, // Memberikan spasi antar baris agar teks panjang enak dibaca
+                        ),
+                        softWrap: true,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
           ],
         ),
       ),
     );
   }
 
-  Widget _excelButton() {
-    return ElevatedButton(
-      onPressed: () {},
+  Widget _excelButton() => ElevatedButton(
+      onPressed: _isLoading ? null : _exportExcel,
       style: ElevatedButton.styleFrom(
         backgroundColor: AppColors.excel,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-        ),
+        elevation: 4,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
-      child: FaIcon(FontAwesomeIcons.fileExcel, color: Colors.black),
-    );
-  }
+      child: const FaIcon(FontAwesomeIcons.fileExcel, color: Colors.black, size: 18)
+  );
 
-  Widget _printButton() {
-    return ElevatedButton(
-      onPressed: () {},
+  Widget _printButton() => ElevatedButton(
+      onPressed: _isLoading ? null : _printPdf,
       style: ElevatedButton.styleFrom(
         backgroundColor: AppColors.print,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-        ),
+        elevation: 4,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
-      child: const Icon(Icons.print, color: Colors.black),
-    );
-  }
+      child: const Icon(Icons.print, color: Colors.black, size: 20)
+  );
 }
