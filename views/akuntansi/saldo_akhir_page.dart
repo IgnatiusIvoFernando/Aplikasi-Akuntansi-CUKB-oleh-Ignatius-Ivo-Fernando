@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import '../../config/warna_cukb.dart';
 import '../../controllers/database_helper.dart';
 import '../widgets/app_drawer.dart';
-import '../../controllers/saldo_controller.dart';
+import '../../controllers/saldo_akhir_controller.dart';
 
 class SaldoAkhirPage extends StatefulWidget {
   const SaldoAkhirPage({super.key});
@@ -76,7 +76,6 @@ class _SaldoAkhirPageState extends State<SaldoAkhirPage> {
       final db = await DatabaseHelper().database;
 
       await db.transaction((txn) async {
-        // 1. Hapus semua details terlebih dahulu
         await txn.rawDelete('''
         DELETE FROM jurnal_detail 
         WHERE jurnal_id IN (
@@ -86,7 +85,6 @@ class _SaldoAkhirPageState extends State<SaldoAkhirPage> {
         )
       ''', [tahun, bulanAngka]);
 
-        // 2. Hapus headers
         final result = await txn.rawDelete('''
         DELETE FROM jurnal_umum 
         WHERE strftime('%Y', tanggal) = ? 

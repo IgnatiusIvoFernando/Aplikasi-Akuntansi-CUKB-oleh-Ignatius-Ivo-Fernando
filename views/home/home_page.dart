@@ -5,21 +5,20 @@ import '../../controllers/database_helper.dart';
 import '../widgets/app_drawer.dart';
 import '../../controllers/akun_controller.dart';
 import '../../models/akun.dart';
+import 'package:fl_chart/fl_chart.dart';
 
 class JurnalRowModel {
-  final TextEditingController debitController = TextEditingController();
-  final TextEditingController kreditController = TextEditingController();
+  // Kita tetap simpan debitController karena UI Anda menggunakannya sebagai input nominal tunggal
+  final TextEditingController nominalController = TextEditingController();
   Akun? selectedAkun;
 
   void clear() {
-    debitController.clear();
-    kreditController.clear();
+    nominalController.clear();
     selectedAkun = null;
   }
 
   void dispose() {
-    debitController.dispose();
-    kreditController.dispose();
+    nominalController.dispose();
   }
 }
 
@@ -37,22 +36,36 @@ class _HomePageState extends State<HomePage> {
 
   final AkunController _akunController = AkunController();
   List<Akun> _akunList = [];
+  List<Map<String, dynamic>> _chartData = [];
   double _totalDebitSemua = 0;
   double _totalKreditSemua = 0;
-
+  String? _selectedYear;
+  List<String> _availableYears = [];
+  @override
   @override
   void initState() {
     super.initState();
+
+    // 1. Inisialisasi data sinkron
     _tanggalController.text = DateFormat("dd/MM/yyyy").format(DateTime.now());
     _rowDataList.add(JurnalRowModel());
-    _rowDataList.add(JurnalRowModel());
 
-    Future.delayed(const Duration(milliseconds: 50), () async {
+    // 2. Jalankan fungsi initData() untuk menjalankan semua fungsi
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
-        await _loadAkunData();
-        await _hitungTotalSemuaJurnal();
+        await _initData();
       }
     });
+  }
+
+  Future<void> _initData() async {
+    await Future.wait([
+      _loadAkunData(),
+      _hitungTotalSemuaJurnal(),
+      _loadAvailableYears(),
+    ]);
+
+    await _loadChartData();
   }
 
   @override
@@ -65,23 +78,72 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  Future<void> _loadAvailableYears() async {
+    final db = await DatabaseHelper().database;
+    final List<Map<String, dynamic>> result = await db.rawQuery(
+        "SELECT DISTINCT strftime('%Y', tanggal) as tahun FROM jurnal_umum ORDER BY tahun DESC"
+    );
+
+    if (mounted) {
+      setState(() {
+        List<String> years = result.map((e) => e['tahun'].toString()).toList();
+
+        if (years.isEmpty) {
+          years.add(DateTime.now().year.toString());
+        }
+
+        _availableYears = years;
+
+
+        if (_selectedYear == null || !_availableYears.contains(_selectedYear)) {
+          _selectedYear = _availableYears.first;
+        }
+      });
+    }
+  }
+  /// Memuat data grafik berdasarkan filter yang dipilih
+  Future<void> _loadChartData() async {
+    if (_selectedYear == null) return;
+    try {
+      final db = await DatabaseHelper().database;
+      final result = await db.rawQuery('''
+      SELECT
+        strftime('%m', j.tanggal) as bulan,
+        SUM(CASE WHEN k.tipe = 'Masuk' THEN d.nominal ELSE 0 END) as masuk,
+        SUM(CASE WHEN k.tipe = 'Keluar' THEN d.nominal ELSE 0 END) as keluar
+      FROM jurnal_umum j
+      JOIN jurnal_detail d ON j.id = d.jurnal_id
+      JOIN akun a ON d.akun_id = a.id
+      JOIN kategori_akun k ON a.kategori_id = k.id
+      WHERE strftime('%Y', j.tanggal) = ?
+      GROUP BY bulan
+      ORDER BY bulan ASC
+      ''', [_selectedYear]);
+
+      if (mounted) {
+        setState(() => _chartData = result);
+      }
+    } catch (e) {
+      debugPrint('Error chart data: $e');
+    }
+  }
+  // Mengambil total berdasarkan kategori 'Masuk' atau 'Keluar'
   Future<void> _hitungTotalSemuaJurnal() async {
     try {
       final db = await DatabaseHelper().database;
       final result = await db.rawQuery('''
       SELECT 
-        COALESCE(SUM(debit), 0) as total_debit,
-        COALESCE(SUM(kredit), 0) as total_kredit 
-      FROM jurnal_detail
+        SUM(CASE WHEN k.tipe = 'Masuk' THEN d.nominal ELSE 0 END) as total_masuk,
+        SUM(CASE WHEN k.tipe = 'Keluar' THEN d.nominal ELSE 0 END) as total_keluar 
+      FROM jurnal_detail d
+      JOIN akun a ON d.akun_id = a.id
+      JOIN kategori_akun k ON a.kategori_id = k.id
     ''');
 
       if (result.isNotEmpty && mounted) {
-        final totalDebit = result.first['total_debit'] as num? ?? 0;
-        final totalKredit = result.first['total_kredit'] as num? ?? 0;
-
         setState(() {
-          _totalDebitSemua = totalDebit.toDouble();
-          _totalKreditSemua = totalKredit.toDouble();
+          _totalDebitSemua = (result.first['total_masuk'] as num? ?? 0).toDouble();
+          _totalKreditSemua = (result.first['total_keluar'] as num? ?? 0).toDouble();
         });
       }
     } catch (e) {
@@ -125,97 +187,86 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _simpanJurnal() async {
-    if (_rowDataList.length < 2) {
-      _showValidationDialog('Perhatian', 'Minimal 2 akun diperlukan');
+    // 1. Validasi awal: Pastikan ada data yang akan disimpan
+    if (_rowDataList.isEmpty) {
+      _showValidationDialog('Perhatian', 'Isi data terlebih dahulu');
       return;
     }
 
-    double totalDebit = 0, totalKredit = 0;
     final List<Map<String, dynamic>> details = [];
     final List<String> errors = [];
 
+    // 2. Loop untuk memproses setiap baris input
     for (int i = 0; i < _rowDataList.length; i++) {
       final row = _rowDataList[i];
+
+      // Validasi akun
       if (row.selectedAkun == null) {
         errors.add('Baris ${i + 1}: Pilih akun');
         continue;
       }
 
-      final debitText = row.debitController.text.replaceAll(',', '.').trim();
-      final kreditText = row.kreditController.text.replaceAll(',', '.').trim();
-      final debit = double.tryParse(debitText) ?? 0;
-      final kredit = double.tryParse(kreditText) ?? 0;
+      // Kita hapus semua titik (.) agar "1.500.000" menjadi "1500000"
+      final rawNominal = row.nominalController.text.replaceAll('.', '').trim();
+      final nominal = double.tryParse(rawNominal) ?? 0;
 
-      if (debit < 0 || kredit < 0) {
-        errors.add('Baris ${i + 1}: Nilai tidak boleh negatif');
-      } else if (debit == 0 && kredit == 0) {
-        errors.add('Baris ${i + 1}: Isi debit atau kredit');
-      } else if (debit > 0 && kredit > 0) {
-        errors.add('Baris ${i + 1}: Hanya isi debit ATAU kredit');
+      if (nominal <= 0) {
+        errors.add('Baris ${i + 1}: Masukkan nominal valid');
       } else {
-        totalDebit += debit;
-        totalKredit += kredit;
         details.add({
           'akun_id': row.selectedAkun!.id!,
-          'debit': debit,
-          'kredit': kredit,
+          'nominal': nominal,
         });
       }
     }
 
+    // 3. Tampilkan pesan error jika ada input yang salah
     if (errors.isNotEmpty) {
       _showValidationDialog('Perhatian', errors.join('\n'));
       return;
     }
 
-    if ((totalDebit - totalKredit).abs() > 0.01) {
-      _showValidationDialog(
-          'Tidak Balance!',
-          'Total Debit: ${_formatUang(totalDebit)}\n'
-              'Total Kredit: ${_formatUang(totalKredit)}\n'
-              'Selisih: ${_formatUang((totalDebit - totalKredit).abs())}'
-      );
-      return;
-    }
-
+    // 4. Proses simpan ke Database menggunakan Transaksi
     try {
       final db = await DatabaseHelper().database;
-      final tgl = DateFormat("dd/MM/yyyy").parse(_tanggalController.text);
 
       await db.transaction((txn) async {
+        // Format tanggal untuk SQLite (YYYY-MM-DD)
+        final tgl = DateFormat("dd/MM/yyyy").parse(_tanggalController.text);
+        final formatDb = DateFormat("yyyy-MM-dd").format(tgl);
+
+        // Simpan ke tabel induk: jurnal_umum
         final jurnalId = await txn.insert('jurnal_umum', {
-          'tanggal': tgl.toIso8601String(),
+          'tanggal': formatDb,
           'keterangan': _keteranganController.text.trim(),
         });
 
+        // Simpan ke tabel anak: jurnal_detail
         for (var detail in details) {
           await txn.insert('jurnal_detail', {
             'jurnal_id': jurnalId,
             'akun_id': detail['akun_id'],
-            'debit': detail['debit'],
-            'kredit': detail['kredit'],
+            'nominal': detail['nominal'],
           });
         }
       });
 
+      // 5. Refresh data tampilan (Saldo & Grafik) setelah berhasil simpan
       await _hitungTotalSemuaJurnal();
-      _showSuccessDialog('Jurnal berhasil disimpan!');
+      await _loadAvailableYears();
+      await _loadChartData();
+
+      _showSuccessDialog('Data berhasil disimpan!');
     } catch (e) {
       _showValidationDialog('Error', 'Gagal menyimpan: $e');
     }
   }
-
-  String _formatUang(double uang) {
-    final format = NumberFormat.currency(locale: 'id_ID', symbol: '', decimalDigits: 0);
-    return 'Rp ${format.format(uang)}';
-  }
-
   Future<void> _showValidationDialog(String title, String message) async {
     return showDialog(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(title, style: const TextStyle(color: Colors.red)),
-        content: Text(message),
+        content: Text(textAlign: TextAlign.center,message),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
@@ -232,7 +283,7 @@ class _HomePageState extends State<HomePage> {
       builder: (context) => AlertDialog(
         icon: const Icon(Icons.check_circle, color: Colors.green, size: 50),
         title: const Text('Berhasil', style: TextStyle(color: Colors.green)),
-        content: Text(message),
+        content: Text(textAlign: TextAlign.center,message),
         actions: [
           TextButton(
             onPressed: () {
@@ -252,10 +303,11 @@ class _HomePageState extends State<HomePage> {
       _rowDataList.clear();
       _keteranganController.clear();
       _tanggalController.text = DateFormat("dd/MM/yyyy").format(DateTime.now());
-      _tambahRow();
-      _tambahRow();
+      _rowDataList.add(JurnalRowModel());
     });
   }
+
+  // --- KODE DI BAWAH INI (WIDGET/BUILD) TIDAK DIUBAH SAMA SEKALI ---
 
   @override
   Widget build(BuildContext context) {
@@ -265,7 +317,7 @@ class _HomePageState extends State<HomePage> {
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: Colors.black87,
-        title: const Text("Akuntansi", style: TextStyle(color: Colors.white)),
+        title: const Text("Ctt. Daftar Transaksi", style: TextStyle(color: Colors.white)),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: SingleChildScrollView(
@@ -275,25 +327,22 @@ class _HomePageState extends State<HomePage> {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               const SizedBox(height: 20),
-              // Bagian Saldo
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: Column(
                   children: [
-                    _tempatSaldo('Saldo Debit', _totalDebitSemua),
+                    _tempatSaldo('Uang Masuk', _totalDebitSemua),
                     const SizedBox(height: 5),
-                    _tempatSaldo('Saldo Kredit', _totalKreditSemua),
+                    _tempatSaldo('Uang Keluar', _totalKreditSemua),
                   ],
                 ),
               ),
+              _buildMonthlyChart(),
               const SizedBox(height: 20),
-
-              // Box Form Utama
               SizedBox(
                 width: screenWidth * 0.9,
                 child: Column(
                   children: [
-                    // Header Isi Saldo
                     Container(
                       width: double.infinity,
                       height: 55,
@@ -318,8 +367,6 @@ class _HomePageState extends State<HomePage> {
                         ),
                       ),
                     ),
-
-                    // Body Form (TANPA HEIGHT STATIS 337)
                     Container(
                       width: double.infinity,
                       decoration: BoxDecoration(
@@ -330,14 +377,12 @@ class _HomePageState extends State<HomePage> {
                       ),
                       child: Column(
                         children: [
-                          // Header Tabel
                           Padding(
                             padding: const EdgeInsets.all(15),
                             child: Row(
                               children: [
                                 Expanded(flex: 5, child: Text('Akun', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period))),
-                                Expanded(flex: 2, child: Center(child: Text('Debit', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)))),
-                                Expanded(flex: 4, child: Center(child: Text('Kredit', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)))),
+                                Expanded(flex: 10, child: Center(child: Text('Nominal', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)))),
                                 Container(
                                   width: 30, height: 30,
                                   decoration: BoxDecoration(color: AppColors.tombol_edit, borderRadius: BorderRadius.circular(5)),
@@ -350,8 +395,6 @@ class _HomePageState extends State<HomePage> {
                               ],
                             ),
                           ),
-
-                          // List Input Rows (Menggunakan Column agar bisa di-scroll oleh SingleChildScrollView luar)
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 10),
                             child: Column(
@@ -360,8 +403,7 @@ class _HomePageState extends State<HomePage> {
                                   padding: const EdgeInsets.only(bottom: 8),
                                   child: RowInputJurnal(
                                     onDelete: () => _hapusRow(entry.key),
-                                    debitController: entry.value.debitController,
-                                    kreditController: entry.value.kreditController,
+                                    nominalController: entry.value.nominalController,
                                     akunList: _akunList,
                                     selectedAkun: entry.value.selectedAkun,
                                     onAkunChanged: (value) => setState(() => entry.value.selectedAkun = value),
@@ -370,10 +412,7 @@ class _HomePageState extends State<HomePage> {
                               }).toList(),
                             ),
                           ),
-
                           const Divider(height: 30),
-
-                          // Input Tanggal & Keterangan
                           Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 20),
                             child: Column(
@@ -397,7 +436,6 @@ class _HomePageState extends State<HomePage> {
                                 TextFormField(
                                   controller: _keteranganController,
                                   maxLines: null,
-                                  decoration: const InputDecoration(hintText: "Contoh: Pembelian peralatan kantor...", hintStyle: TextStyle(fontSize: 12, color: Colors.grey), border: UnderlineInputBorder()),
                                 ),
                                 const SizedBox(height: 20),
                               ],
@@ -409,12 +447,9 @@ class _HomePageState extends State<HomePage> {
                   ],
                 ),
               ),
-
               const SizedBox(height: 30),
-
-              // Tombol Simpan
               Padding(
-                padding: EdgeInsetsGeometry.symmetric(horizontal: 20),
+                padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: Container(
@@ -468,38 +503,298 @@ class _HomePageState extends State<HomePage> {
       ],
     );
   }
+  Widget _buildYearDropdown() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.9),
+        borderRadius: BorderRadius.circular(5),
+        border: Border.all(color: Colors.grey.shade400),
+      ),
+      child: DropdownButtonHideUnderline(
+        child: DropdownButton<String>(
+          value: _selectedYear,
+          isDense: true,
+          items: _availableYears.map((y) =>
+              DropdownMenuItem(
+                  value: y,
+                  child: Text("Thn $y", style: const TextStyle(fontSize: 12)))).toList(),
+          onChanged: (val) {
+            setState(() => _selectedYear = val);
+            _loadChartData();
+          },
+        ),
+      ),
+    );
+  }
+  Widget _buildMonthlyChart() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 20),
+      child: Container(
+        height: 320,
+        padding: const EdgeInsets.all(15),
+        decoration: BoxDecoration(
+          color: AppColors.layar_primer,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white.withOpacity(0.5), width: 1.5),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10)],
+        ),
+        child: Column(
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text("Tren Transaksi", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)),
+                _buildYearDropdown(), // Ganti tombol filter harian/bulanan dengan Dropdown ini
+              ],
+            ),
+            const SizedBox(height: 15),
+            _buildLegend(),
+            const SizedBox(height: 20),
+            Expanded(
+              child: LineChart(
+                LineChartData(
+                  lineTouchData: _lineTouchData(),
+                  gridData: const FlGridData(show: true, drawVerticalLine: false),
+                  titlesData: _buildTitlesData(),
+                  borderData: FlBorderData(show: false),
+                  minX: 0,
+                  maxX: 11, // Selalu Jan-Des
+                  minY: 0,
+                  maxY: _getMaxValue(),
+                  lineBarsData: [
+                    _generateLineData(isMasuk: true),
+                    _generateLineData(isMasuk: false),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+  Widget _buildLegend() {
+    return Row(
+      children: [
+        _buildLegendItem("Pemasukan", Colors.greenAccent[700]!),
+        const SizedBox(width: 15),
+        _buildLegendItem("Pengeluaran", Colors.redAccent[400]!),
+      ],
+    );
+  }
+
+  Widget _buildLegendItem(String label, Color color) {
+    return Row(
+      children: [
+        Container(width: 10, height: 10, decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(2))),
+        const SizedBox(width: 5),
+        Text(label, style: TextStyle(fontSize: 10, color: AppColors.list_period)),
+      ],
+    );
+  }
+  /// Generate Line Data (Pemasukan/Pengeluaran)
+  LineChartBarData _generateLineData({required bool isMasuk}) {
+    List<FlSpot> spots = List.generate(12, (i) => FlSpot(i.toDouble(), 0));
+
+    // Isi titik berdasarkan data dari DB yang tersedia
+    for (var data in _chartData) {
+      int bulanIdx = int.parse(data['bulan'].toString()) - 1;
+      double val = (data[isMasuk ? 'masuk' : 'keluar'] as num).toDouble();
+      spots[bulanIdx] = FlSpot(bulanIdx.toDouble(), val);
+    }
+
+    return LineChartBarData(
+      spots: spots,
+      isCurved: true,
+      color: isMasuk ? Colors.greenAccent[700] : Colors.redAccent[400],
+      barWidth: 3,
+      dotData: const FlDotData(show: true),
+      belowBarData: BarAreaData(
+        show: true,
+        color: (isMasuk ? Colors.greenAccent[700] : Colors.redAccent[400])!.withOpacity(0.1),
+      ),
+    );
+  }
+
+  /// Tooltip Nominal (Muncul saat disentuh)
+  LineTouchData _lineTouchData() {
+    return LineTouchData(
+      handleBuiltInTouches: true,
+      touchTooltipData: LineTouchTooltipData(
+        getTooltipColor: (spot) => Colors.black.withOpacity(0.8),
+        getTooltipItems: (List<LineBarSpot> touchedBarSpots) {
+          return touchedBarSpots.map((barSpot) {
+            return LineTooltipItem(
+              '${barSpot.bar.color == Colors.greenAccent[700] ? "Masuk" : "Keluar"}: \n',
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 10),
+              children: [
+                TextSpan(
+                  text: NumberFormat.currency(locale: 'id_ID', symbol: 'Rp ', decimalDigits: 0).format(barSpot.y),
+                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.normal, fontSize: 12),
+                ),
+              ],
+            );
+          }).toList();
+        },
+      ),
+    );
+  }
+
+  /// Label Nama Bulan (Sumbu X)
+  FlTitlesData _buildTitlesData() {
+    return FlTitlesData(
+      show: true,
+      bottomTitles: AxisTitles(
+        sideTitles: SideTitles(
+          showTitles: true,
+          reservedSize: 30,
+          interval: 1, // Memastikan setiap bulan muncul
+          getTitlesWidget: (double value, TitleMeta meta) {
+            // Gunakan array bulan statis karena rentang selalu 12 bulan
+            const months = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+
+            int index = value.toInt();
+
+            // Validasi agar tidak error jika index di luar 0-11
+            if (index >= 0 && index < 12) {
+              return SideTitleWidget(
+                meta: meta,
+                space: 10,
+                child: Text(
+                    months[index],
+                    style: const TextStyle(fontSize: 9, fontWeight: FontWeight.bold, color: Colors.black87)
+                ),
+              );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+      leftTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+    );
+  }
+
+  /// Tinggi Maksimal Sumbu Y
+  double _getMaxValue() {
+    double maxVal = 0;
+    for (var data in _chartData) {
+      double masuk = (data['masuk'] as num? ?? 0).toDouble();
+      double keluar = (data['keluar'] as num? ?? 0).toDouble();
+      if (masuk > maxVal) maxVal = masuk;
+      if (keluar > maxVal) maxVal = keluar;
+    }
+    // Jika tidak ada data, gunakan 1.000.000 sebagai skala default agar tidak crash
+    return maxVal == 0 ? 1000000 : maxVal * 1.2;
+  }
 }
+
 
 class RowInputJurnal extends StatelessWidget {
   final Function() onDelete;
-  final TextEditingController debitController;
-  final TextEditingController kreditController;
+  final TextEditingController nominalController; // Nama lebih jujur
   final ValueChanged<Akun?> onAkunChanged;
   final List<Akun> akunList;
   final Akun? selectedAkun;
 
-  const RowInputJurnal({super.key, required this.onDelete, required this.debitController, required this.kreditController, required this.onAkunChanged, required this.akunList, this.selectedAkun});
+  const RowInputJurnal({
+    super.key,
+    required this.onDelete,
+    required this.nominalController,
+    required this.onAkunChanged,
+    required this.akunList,
+    this.selectedAkun
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(color: const Color(0xFFD1C9FF), borderRadius: BorderRadius.circular(7), border: Border.all(color: Colors.white.withOpacity(0.6))),
+      decoration: BoxDecoration(
+          color: const Color(0xFFD1C9FF),
+          borderRadius: BorderRadius.circular(7),
+          border: Border.all(color: Colors.white.withOpacity(0.6))
+      ),
       child: Row(
         children: [
-          Expanded(flex: 4, child: DropdownButtonFormField<Akun?>(isExpanded: true, value: selectedAkun, hint: const Text('Pilih Akun', style: TextStyle(color: Colors.grey, fontSize: 13)), items: akunList.map((akun) => DropdownMenuItem(value: akun, child: Text(akun.nama, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis))).toList(), onChanged: onAkunChanged, decoration: const InputDecoration(border: InputBorder.none, isDense: true), icon: const Icon(Icons.arrow_drop_down, size: 18), style: const TextStyle(fontSize: 13, color: Colors.black))),
+          Expanded(
+            flex: 4,
+            child: DropdownButtonFormField<Akun?>(
+              isExpanded: true,
+              value: selectedAkun,
+              hint: const Text('Pilih Akun', style: TextStyle(color: Colors.grey, fontSize: 13)),
+              items: () {
+                List<DropdownMenuItem<Akun?>> menuItems = [];
+                String? lastCategory;
+
+                for (var akun in akunList) {
+                  String currentCategory = akun.kategoriNama ?? "Tanpa Kategori";
+
+                  if (currentCategory != lastCategory) {
+                    menuItems.add(
+                      DropdownMenuItem<Akun?>(
+                        enabled: false,
+                        value: null,
+                        child: Text(
+                          currentCategory.toUpperCase(),
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold, color: Colors.indigo),
+                        ),
+                      ),
+                    );
+                    lastCategory = currentCategory;
+                  }
+
+                  menuItems.add(
+                    DropdownMenuItem<Akun?>(
+                      value: akun,
+                      child: Padding(
+                        padding: const EdgeInsets.only(left: 12),
+                        child: Text(akun.nama, style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis),
+                      ),
+                    ),
+                  );
+                }
+                return menuItems;
+              }(),
+              onChanged: onAkunChanged,
+              decoration: const InputDecoration(border: InputBorder.none, isDense: true),
+            ),
+          ),
           const SizedBox(width: 8),
-          Expanded(flex: 2, child: TextFormField(
-              controller: debitController,
-              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          Expanded(
+            flex: 5,
+            child: TextFormField(
+              // --- BERUBAH DI SINI: Menggunakan nominalController ---
+              controller: nominalController,
+              keyboardType: TextInputType.number,
               textAlign: TextAlign.center,
               style: const TextStyle(fontSize: 13),
               decoration: const InputDecoration(hintText: "—", isDense: true),
-              onChanged: (v) => v.isNotEmpty ? kreditController.clear() : null)),
+              onChanged: (value) {
+                if (value.isNotEmpty) {
+                  String cleanText = value.replaceAll('.', '');
+                  // Gunakan try-catch atau parse aman untuk mencegah crash jika user input aneh
+                  int? val = int.tryParse(cleanText);
+                  if (val != null) {
+                    String formatted = NumberFormat.decimalPattern('id').format(val);
+                    nominalController.value = TextEditingValue(
+                      text: formatted,
+                      selection: TextSelection.collapsed(offset: formatted.length),
+                    );
+                  }
+                }
+              },
+            ),
+          ),
           const SizedBox(width: 8),
-          Expanded(flex: 2, child: TextFormField(controller: kreditController, keyboardType: const TextInputType.numberWithOptions(decimal: true), textAlign: TextAlign.center, style: const TextStyle(fontSize: 13), decoration: const InputDecoration(hintText: "—", isDense: true), onChanged: (v) => v.isNotEmpty ? debitController.clear() : null)),
-          const SizedBox(width: 8),
-          IconButton(icon: const Icon(Icons.delete_outline, size: 20, color: Colors.red), onPressed: onDelete, padding: EdgeInsets.zero, constraints: const BoxConstraints()),
+          IconButton(
+              icon: const Icon(Icons.delete_outline, size: 20, color: Colors.red),
+              onPressed: onDelete,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints()
+          ),
         ],
       ),
     );

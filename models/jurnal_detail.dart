@@ -1,22 +1,19 @@
-// models/jurnal_detail.dart
 import 'akun.dart';
 
 class JurnalDetail {
   int? id;
   int jurnalId;
   int akunId;
-  double debit;
-  double kredit;
+  double nominal;
 
-  // RELASI: Untuk join dengan tabel akun
-  Akun? akun; // Foreign key relation
+  // RELASI: Opsional untuk menampung data akun hasil JOIN
+  Akun? akun;
 
   JurnalDetail({
     this.id,
     required this.jurnalId,
     required this.akunId,
-    required this.debit,
-    required this.kredit,
+    required this.nominal,
     this.akun,
   });
 
@@ -25,8 +22,7 @@ class JurnalDetail {
       'id': id,
       'jurnal_id': jurnalId,
       'akun_id': akunId,
-      'debit': debit,
-      'kredit': kredit,
+      'nominal': nominal,
     };
   }
 
@@ -35,29 +31,25 @@ class JurnalDetail {
       id: map['id'],
       jurnalId: map['jurnal_id'],
       akunId: map['akun_id'],
-      debit: (map['debit'] as num?)?.toDouble() ?? 0,
-      kredit: (map['kredit'] as num?)?.toDouble() ?? 0,
+      nominal: (map['nominal'] as num?)?.toDouble() ?? 0,
     );
   }
 
-  // Factory dengan join akun
+  // TAMBAHKAN INI: Untuk memudahkan pembacaan saat melakukan JOIN dengan tabel Akun
   factory JurnalDetail.fromMapWithAkun(Map<String, dynamic> map) {
     return JurnalDetail(
       id: map['id'],
       jurnalId: map['jurnal_id'],
       akunId: map['akun_id'],
-      debit: (map['debit'] as num?)?.toDouble() ?? 0,
-      kredit: (map['kredit'] as num?)?.toDouble() ?? 0,
-      akun: map['akun_id'] != null ? Akun.fromMap({
+      nominal: (map['nominal'] as num?)?.toDouble() ?? 0,
+      akun: map['akun_nama'] != null
+          ? Akun.fromMap({
         'id': map['akun_id'],
         'nama': map['akun_nama'],
         'kategori_id': map['akun_kategori_id'],
-      }) : null,
+        'tipe': map['kategori_tipe'], // Sangat penting untuk logika saldo
+      })
+          : null,
     );
-  }
-
-  @override
-  String toString() {
-    return 'JurnalDetail{id: $id, jurnalId: $jurnalId, akunId: $akunId, debit: $debit, kredit: $kredit, akun: $akun}';
   }
 }

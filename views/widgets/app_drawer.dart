@@ -122,25 +122,25 @@ class _AppDrawerState extends State<AppDrawer> {
             const SizedBox(height: 25),
 
             // Menu Items
-            _buildRetroMenuItem(
+            _buildMenuItem(
               id: "mengisi",
               title: "MENGISI SALDO",
               icon: Icons.account_balance_wallet_outlined,
               onTap: () => _navigate(context, const HomePage()),
             ),
-            _buildRetroMenuItem(
+            _buildMenuItem(
               id: "jurnal",
-              title: "JURNAL UMUM",
+              title: "DAFTAR TRANSAKSI",
               icon: Icons.history_edu_outlined,
               onTap: () => _navigate(context, const JurnalUmumPage()),
             ),
-            _buildRetroMenuItem(
+            _buildMenuItem(
               id: "saldo",
               title: "SALDO AKHIR",
               icon: Icons.pie_chart_outline,
               onTap: () => _navigate(context, const SaldoAkhirPage()),
             ),
-            _buildRetroMenuItem(
+            _buildMenuItem(
               id: "pengaturan",
               title: "PENGATURAN",
               icon: Icons.settings_outlined,
@@ -169,7 +169,7 @@ class _AppDrawerState extends State<AppDrawer> {
     Navigator.push(context, MaterialPageRoute(builder: (context) => page));
   }
 
-  Widget _buildRetroMenuItem({
+  Widget _buildMenuItem({
     required String id,
     required String title,
     required IconData icon,

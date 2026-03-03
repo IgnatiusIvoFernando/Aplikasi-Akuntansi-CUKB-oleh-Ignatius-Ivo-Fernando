@@ -5,6 +5,7 @@ class ProfilPerusahaan {
   String? jenisIndustri;
   String? negara;
   String? provinsi;
+  String? kota;
   String? alamat;
   String? fotoPath; // Tambahan Baru
 
@@ -14,6 +15,7 @@ class ProfilPerusahaan {
     this.jenisIndustri,
     this.negara,
     this.provinsi,
+    this.kota,
     this.alamat,
     this.fotoPath,
   });
@@ -25,6 +27,7 @@ class ProfilPerusahaan {
       'jenis_industri': jenisIndustri,
       'negara': negara,
       'provinsi': provinsi,
+      'kota': kota,
       'alamat': alamat,
       'foto_path': fotoPath, // Tambahan Baru
     };
@@ -37,6 +40,7 @@ class ProfilPerusahaan {
       jenisIndustri: map['jenis_industri'],
       negara: map['negara'],
       provinsi: map['provinsi'],
+      kota: map['kota'],
       alamat: map['alamat'],
       fotoPath: map['foto_path'], // Tambahan Baru
     );

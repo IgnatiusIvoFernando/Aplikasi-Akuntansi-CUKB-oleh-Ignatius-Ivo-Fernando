@@ -11,6 +11,46 @@ class AkunController {
     return result.map((map) => Kategori.fromMap(map)).toList();
   }
 
+  // 2. Ambil Semua Akun dengan Tipe (Masuk/Keluar)
+  // Penting untuk menentukan apakah transaksi menambah atau mengurangi saldo
+  Future<List<Akun>> getSemuaAkun() async {
+    final db = await _dbHelper.database;
+    final result = await db.rawQuery('''
+    SELECT a.*, k.nama as kategori_nama, k.tipe 
+    FROM akun a 
+    JOIN kategori_akun k ON a.kategori_id = k.id 
+    ORDER BY k.nama ASC, a.nama ASC -- Diurutkan agar kategori kumpul jadi satu
+  ''');
+    return result.map((map) => Akun.fromMap(map)).toList();
+  }
+  // 3. Ambil Akun Berdasarkan ID (Sertakan tipe kategori)
+  Future<Akun?> getAkunById(int id) async {
+    final db = await _dbHelper.database;
+    final result = await db.rawQuery('''
+      SELECT a.*, k.nama as kategori_nama, k.tipe 
+      FROM akun a 
+      JOIN kategori_akun k ON a.kategori_id = k.id 
+      WHERE a.id = ?
+    ''', [id]);
+
+    return result.isNotEmpty ? Akun.fromMap(result.first) : null;
+  }
+
+  // 4. Ambil Akun Khusus untuk Form Transaksi (Single-Entry)
+  // Mengurutkan berdasarkan tipe agar user mudah memilih Pemasukan/Pengeluaran
+  Future<List<Akun>> getAkunForJurnal() async {
+    final db = await _dbHelper.database;
+    final result = await db.rawQuery('''
+      SELECT a.*, k.nama as kategori_nama, k.tipe 
+      FROM akun a 
+      JOIN kategori_akun k ON a.kategori_id = k.id 
+      ORDER BY k.tipe DESC, k.nama ASC
+    ''');
+
+    return result.map((map) => Akun.fromMap(map)).toList();
+  }
+
+  // 5. Tambah, Update, dan Hapus (Logika CRUD Tetap Sama)
   Future<int> tambahAkun(Akun akun) async {
     final db = await _dbHelper.database;
     return await db.insert('akun', akun.toMap());
@@ -26,62 +66,13 @@ class AkunController {
     );
   }
 
-  // TAMBAHKAN INI: Hapus Akun
   Future<int> hapusAkun(int id) async {
     final db = await _dbHelper.database;
+    // Catatan: Pastikan tidak ada transaksi yang menggunakan akun ini sebelum dihapus
     return await db.delete(
       'akun',
       where: 'id = ?',
       whereArgs: [id],
     );
   }
-  Future<List<Akun>> getSemuaAkun() async {
-    final db = await _dbHelper.database;
-    final result = await db.rawQuery('''
-      SELECT a.*, k.nama as kategori_nama 
-      FROM akun a 
-      JOIN kategori_akun k ON a.kategori_id = k.id 
-      ORDER BY a.nama
-    ''');
-    return result.map((map) => Akun.fromMap(map)).toList();
-  }
-
-  Future<List<Akun>> getAkunByKategori(String kategoriNama) async {
-    final db = await _dbHelper.database;
-    final result = await db.rawQuery(
-      '''
-      SELECT a.*, k.nama as kategori_nama 
-      FROM akun a 
-      JOIN kategori_akun k ON a.kategori_id = k.id 
-      WHERE k.nama = ?
-    ''',
-      [kategoriNama],
-    );
-    return result.map((map) => Akun.fromMap(map)).toList();
-  }
-  // controllers/akun_controller.dart (TAMBAHKAN)
-  Future<Akun?> getAkunById(int id) async {
-    final db = await _dbHelper.database;
-    final result = await db.rawQuery('''
-    SELECT a.*, k.nama as kategori_nama 
-    FROM akun a 
-    JOIN kategori_akun k ON a.kategori_id = k.id 
-    WHERE a.id = ?
-  ''', [id]);
-
-    return result.isNotEmpty ? Akun.fromMap(result.first) : null;
-  }
-
-  Future<List<Akun>> getAkunForJurnal() async {
-    final db = await _dbHelper.database;
-    final result = await db.rawQuery('''
-    SELECT a.*, k.nama as kategori_nama 
-    FROM akun a 
-    JOIN kategori_akun k ON a.kategori_id = k.id 
-    ORDER BY a.kategori_id
-  ''');
-
-    return result.map((map) => Akun.fromMap(map)).toList();
-  }
-
 }

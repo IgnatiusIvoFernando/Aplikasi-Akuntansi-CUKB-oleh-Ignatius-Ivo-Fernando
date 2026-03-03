@@ -17,7 +17,10 @@ class PengaturanPage extends StatelessWidget {
       backgroundColor: AppColors.background,
       appBar: AppBar(
         backgroundColor: Colors.black87,
-        title: const Text("Akuntansi", style: TextStyle(color: Colors.white)),
+        title: const Text(
+          "Ctt. Daftar Transaksi",
+          style: TextStyle(color: Colors.white),
+        ),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: SingleChildScrollView(
@@ -67,7 +70,7 @@ class PengaturanPage extends StatelessWidget {
                         Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (context) => const CukbAkun(),
+                            builder: (context) => const DaftarAkunPage(),
                           ),
                         );
                       },
@@ -83,6 +86,7 @@ class PengaturanPage extends StatelessWidget {
   }
 }
 
+// ====== MENU CARD SEBAGAI TOMBOL =======
 class _MenuCard extends StatelessWidget {
   final String title;
   final IconData icon;
@@ -100,7 +104,6 @@ class _MenuCard extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(10),
       child: Container(
-        // Menghapus width statis agar mengikuti Expanded dari parent-nya
         height: 140,
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -110,7 +113,6 @@ class _MenuCard extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // FittedBox agar teks panjang tidak pecah ke bawah/overflow
             FittedBox(
               fit: BoxFit.scaleDown,
               child: Text(
