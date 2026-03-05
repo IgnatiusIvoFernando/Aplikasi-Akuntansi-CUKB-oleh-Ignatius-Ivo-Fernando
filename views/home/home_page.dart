@@ -307,8 +307,6 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  // --- KODE DI BAWAH INI (WIDGET/BUILD) TIDAK DIUBAH SAMA SEKALI ---
-
   @override
   Widget build(BuildContext context) {
     double screenWidth = MediaQuery.of(context).size.width;
@@ -544,7 +542,7 @@ class _HomePageState extends State<HomePage> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Text("Tren Transaksi", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)),
+                Text("Grafik Transaksi", style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: AppColors.list_period)),
                 _buildYearDropdown(), // Ganti tombol filter harian/bulanan dengan Dropdown ini
               ],
             ),
